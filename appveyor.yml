@@ -1,0 +1,15 @@
+image: Visual Studio 2022
+
+environment:
+  PYTHON: C:\Python39-x64
+
+install:
+  - cmd: "%PYTHON%\\python.exe -m pip install --upgrade pip"
+  - cmd: "%PYTHON%\\python.exe -m pip install -r requirements.txt"
+
+build_script:
+  - cmd: "%PYTHON%\\python.exe -m PyInstaller fapiao.spec"
+
+artifacts:
+  - path: dist\发票识别.exe
+    name: fapiao-windows-exe
