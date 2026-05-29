@@ -9,7 +9,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from openpyxl import Workbook
 
-from extractor import ExtractionError, extract_invoice_number
+from extractor import ExtractionError, extract_invoice_number, init_ocr_engine
 
 
 class InvoiceApp(tk.Tk):
@@ -18,6 +18,9 @@ class InvoiceApp(tk.Tk):
     self.title("发票识别")
     self.geometry("860x520")
     self.minsize(720, 420)
+
+    # 后台预加载 OCR 模型，避免首次识别时等待
+    threading.Thread(target=init_ocr_engine, daemon=True).start()
 
     self.selected_files: list[Path] = []
     self.results: list[dict[str, str]] = []
