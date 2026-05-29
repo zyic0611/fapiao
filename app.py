@@ -35,6 +35,9 @@ class InvoiceApp(tk.Tk):
     ttk.Button(toolbar, text="选择 PDF 文件", command=self._choose_files).pack(
       side=tk.LEFT
     )
+    ttk.Button(toolbar, text="选择文件夹", command=self._choose_folder).pack(
+      side=tk.LEFT, padx=(8, 0)
+    )
     self.recognize_btn = ttk.Button(
       toolbar, text="开始识别", command=self._start_recognition
     )
@@ -85,6 +88,19 @@ class InvoiceApp(tk.Tk):
       return
 
     self.selected_files = [Path(name) for name in filenames]
+    self.file_label.config(text=f"已选择 {len(self.selected_files)} 个文件")
+    self.status_var.set("已选择文件，点击“开始识别”")
+
+  def _choose_folder(self) -> None:
+    folder = filedialog.askdirectory(title="选择包含 PDF 的文件夹")
+    if not folder:
+      return
+
+    self.selected_files = sorted(Path(folder).glob("*.pdf"))
+    if not self.selected_files:
+      messagebox.showinfo("提示", "所选文件夹中没有 PDF 文件")
+      return
+
     self.file_label.config(text=f"已选择 {len(self.selected_files)} 个文件")
     self.status_var.set("已选择文件，点击“开始识别”")
 
