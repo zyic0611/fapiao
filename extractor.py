@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import re
+import threading
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 import fitz
 import numpy as np
 
 _OCR_ENGINE = None
+_OCR_LOCK = threading.Lock()
 
 INVOICE_NUMBER_PATTERN = re.compile(
     r"发票号码\s*[：:]\s*(\d{20}|\d{12}|\d{8})"
@@ -66,51 +68,83 @@ def init_ocr_engine() -> None:
     _get_ocr_engine()
 
 
-def _extract_text_via_all_methods(page: fitz.Page) -> str:
-    """尝试多种方式提取文本，返回所有结果的拼接。"""
+def _text_chunk_from_dict(result: dict) -> str:
+    lines: list[str] = []
+    for block in result.get("blocks", []):
+        for line in block.get("lines", []):
+            line_text = "".join(span["text"] for span in line.get("spans", []))
+            if line_text:
+                lines.append(line_text)
+    return "\n".join(lines)
+
+
+def _iter_page_text_chunks(page: fitz.Page) -> Iterator[str]:
+    """按速度由快到慢产出文本块（跳过 xml/rawdict）。"""
+    try:
+        text = page.get_text("text")
+        if text:
+            yield text
+    except Exception:
+        pass
+
+    try:
+        blocks = page.get_text("blocks")
+        if blocks:
+            chunk = "\n".join(b[4] for b in blocks if b[6] == 0)
+            if chunk:
+                yield chunk
+    except Exception:
+        pass
+
+    try:
+        result = page.get_text("dict")
+        if result:
+            chunk = _text_chunk_from_dict(result)
+            if chunk:
+                yield chunk
+    except Exception:
+        pass
+
+    try:
+        words = page.get_text("words")
+        if words:
+            chunk = " ".join(w[4] for w in words)
+            if chunk:
+                yield chunk
+    except Exception:
+        pass
+
+
+def _extract_invoice_number_from_page(page: fitz.Page) -> Optional[str]:
+    """逐级提取文本，命中即停；最后再试拼接结果。"""
     parts: list[str] = []
-    for method in ("text", "blocks", "dict", "rawdict", "words", "xml"):
-        try:
-            result = page.get_text(method)
-            if not result:
-                continue
-            if method in ("text", "xml"):
-                parts.append(str(result))
-            elif method == "blocks":
-                parts.append("\n".join(b[4] for b in result if b[6] == 0))
-            elif method == "dict":
-                for block in result.get("blocks", []):
-                    for line in block.get("lines", []):
-                        line_text = "".join(
-                            span["text"] for span in line.get("spans", [])
-                        )
-                        parts.append(line_text)
-            elif method == "rawdict":
-                for block in result.get("blocks", []):
-                    for line in block.get("lines", []):
-                        line_text = "".join(
-                            span["text"] for span in line.get("spans", [])
-                        )
-                        parts.append(line_text)
-            elif method == "words":
-                parts.append(" ".join(w[4] for w in result))
-        except Exception:
-            continue
-    return "\n".join(parts)
+    for chunk in _iter_page_text_chunks(page):
+        number = _match_invoice_number(chunk)
+        if number:
+            return number
+        parts.append(chunk)
+    if parts:
+        return _match_invoice_number("\n".join(parts))
+    return None
+
+
+def _run_ocr(image: np.ndarray):
+    with _OCR_LOCK:
+        return _get_ocr_engine()(image)
 
 
 def _ocr_page_top(image: np.ndarray) -> str:
     """对图片上半部分执行 OCR（发票号码通常在顶部）。"""
     h = image.shape[0]
     top_region = image[: max(int(h * 0.4), 1), :, :]
-    result, _ = _get_ocr_engine()(top_region)
+    result, _ = _run_ocr(top_region)
     if not result:
         return ""
     return "\n".join(line[1] for line in result)
 
 
 def _render_and_ocr(page: fitz.Page) -> str:
-    """渲染页面顶部区域并用 OCR 识别。"""
+    """渲染页面并用 OCR 识别；顶部区域优先，未匹配时再整页。"""
     pixmap = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
     image = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(
         pixmap.height, pixmap.width, pixmap.n
@@ -119,11 +153,10 @@ def _render_and_ocr(page: fitz.Page) -> str:
         image = image[:, :, :3]
 
     text = _ocr_page_top(image)
-    if text:
+    if _match_invoice_number(text):
         return text
 
-    # 顶部没找到则 OCR 整页
-    result, _ = _get_ocr_engine()(image)
+    result, _ = _run_ocr(image)
     if not result:
         return ""
     return "\n".join(line[1] for line in result)
@@ -152,13 +185,12 @@ def extract_invoice_number(pdf_path: str | Path) -> str:
 
         page = doc[0]
 
-        # 1. 尝试多种文本提取方式
-        combined_text = _extract_text_via_all_methods(page)
-        number = _match_invoice_number(combined_text)
+        # 1. 文本层提取（快路径，命中即停）
+        number = _extract_invoice_number_from_page(page)
         if number:
             return number
 
-        # 2. OCR 兜底（仅识别页面顶部区域）
+        # 2. OCR 兜底
         ocr_text = _render_and_ocr(page)
         number = _match_invoice_number(ocr_text)
         if number:
@@ -167,3 +199,27 @@ def extract_invoice_number(pdf_path: str | Path) -> str:
         raise ExtractionError(f"未识别到发票号码: {path.name}")
     finally:
         doc.close()
+
+
+def process_pdf_file(pdf_path: str) -> dict[str, str]:
+    """供外部批量调用的顶层函数。"""
+    path = Path(pdf_path)
+    try:
+        invoice_number = extract_invoice_number(pdf_path)
+        return {
+            "filename": path.name,
+            "invoice_number": invoice_number,
+            "status": "成功",
+        }
+    except ExtractionError as exc:
+        return {
+            "filename": path.name,
+            "invoice_number": "",
+            "status": str(exc),
+        }
+    except Exception as exc:
+        return {
+            "filename": path.name,
+            "invoice_number": "",
+            "status": f"识别失败: {exc}",
+        }
