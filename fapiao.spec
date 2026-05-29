@@ -19,6 +19,7 @@ a = Analysis(
     "onnxruntime",
     "fitz",
     "numpy",
+    "openpyxl",
   ]
   + rapidocr_hiddenimports
   + onnx_hiddenimports,
